@@ -1,237 +1,226 @@
-# Mini Fuzzer: A Simple Fuzzer for Study and Testing
+# ToyFuzzer
 
-- This project implements a simple mutation-based fuzzer.
-- It starts from seed inputs.
-- It mutates inputs using byte-level mutation strategies.
-- It executes the target program with each generated input.
-- It detects crashes using return codes and sanitizer outputs.
-- It saves crashing inputs for later analysis.
-- Later, it can be extended with coverage feedback.
+ToyFuzzer is a small mutation-based fuzzer for learning, experiments, and
+research prototyping. It starts from seed files, mutates them, executes a target
+program, and stores crashes, hangs, corpus entries, and run statistics.
 
-## Fuzzing Overview
+The current implementation is intentionally compact, but it already includes
+several features that are useful for controlled fuzzing experiments:
 
-Fuzzing is an automated software testing technique that finds bugs by repeatedly running a program with many generated or mutated inputs.
+- Seed corpus loading from files
+- Optional dictionary tokens, including a small subset of AFL-style syntax
+- Stacked byte-level mutations
+- Dictionary insertion and overwrite mutations
+- Input splicing between corpus entries
+- Reproducible runs with `--random-seed`
+- Target command templates with `@@`
+- Per-execution timeout handling
+- Basic behavior feedback from exit status, stdout, stderr, or trace markers
+- Rare-style corpus scheduling
+- Crash and hang deduplication by signature
+- Optional crash input minimization
+- JSONL progress logs and JSON summary files
 
-Instead of manually writing test cases one by one, a fuzzer automatically creates inputs, executes the target program, observes its behavior, and reports abnormal results such as crashes, hangs, or unexpected outputs.
+This project is not meant to replace AFL++, libFuzzer, Honggfuzz, or other
+production fuzzers. It is a readable toy implementation for understanding the
+moving parts and for testing research ideas before implementing them in a larger
+fuzzing framework.
 
-## Basic Fuzzing Process
-
-The basic fuzzing workflow can be summarized as follows:
-
-```text
-Seed Inputs
-    ↓
-Input Generation / Mutation
-    ↓
-Program Execution
-    ↓
-Behavior Monitoring
-    ↓
-Interesting Input Selection
-    ↓
-Crash Analysis and Bug Fixing
-```
-
-### 1. Select a Target Program
-
-The first step is to choose the program or function to test.
-
-A fuzzing target is usually a component that receives external input, such as:
-
-- File parsers
-- Network protocols
-- Command-line tools
-- Compilers
-- Interpreters
-- Image, PDF, or media processors
-- API input handlers
-
-For example, if a program reads a text file and processes its content, the fuzzer can repeatedly generate different text files and feed them to the program.
-
-### 2. Prepare Seed Inputs
-
-Seed inputs are initial example inputs given to the fuzzer.
-
-They do not need to be perfect, but they should be valid enough to help the fuzzer start exploring meaningful program behavior.
-
-For example:
-
-- A small valid PNG file for an image parser
-- A simple JSON file for a JSON parser
-- A short text file for a command-line text processor
-- A basic HTTP request for a web server
-
-Good seed inputs help the fuzzer reach deeper parts of the program.
-
-### 3. Generate or Mutate Inputs
-
-The fuzzer creates new test inputs from the seed inputs.
-
-There are two common approaches:
-
-- Generation-based fuzzing
-  - The fuzzer creates inputs from a predefined format or grammar.
-  - This is useful when the input structure is well known.
-
-- Mutation-based fuzzing
-  - The fuzzer modifies existing seed inputs.
-  - Typical mutations include flipping bits, inserting bytes, deleting bytes, duplicating chunks, or replacing values.
-
-Example mutations:
+## Repository Layout
 
 ```text
-Original input:
-hello world
-
-Mutated inputs:
-hello wor1d
-hello world!!!
-hllo world
-hello\x00world
+toyFuzzer/
+  toy_fuzzer.py        Main fuzzer implementation
+  target/
+    target1.c          Simple demo target with a FUZZ + CRASH condition
+    target2.c          Demo target with a deeper multi-condition path
+  seeds/
+    seed1.txt          Example seed input
+  dictionary/          Local dictionary files; ignored by git
+  runs/                Fuzzing outputs; ignored by git
 ```
 
-The goal is to create many diverse inputs that may trigger unexpected behavior.
+Other directories in this repository contain separate AFL and fuzzing study
+experiments.
 
-### 4. Execute the Target Program
+## Requirements
 
-The generated input is given to the target program.
+- Python 3.10 or newer
+- `clang` or another C compiler for the example targets
 
-For each input, the fuzzer runs the program and checks whether the program behaves normally.
+ToyFuzzer itself only uses the Python standard library.
 
-A simple example:
+## Quick Start
+
+From the repository root:
+
+```bash
+cd toyFuzzer
+clang -g -O0 target/target1.c -o target/target1
+mkdir -p seeds dictionary
+printf "A" > seeds/seed1.txt
+printf "FUZZ\nCRASH\nFUZZ_CRASH\n" > dictionary/target1.dict
+python3 toy_fuzzer.py --iterations 1000 --random-seed 1 --minimize-crashes
+```
+
+Expected output includes the run directory and, for `target1`, a saved SIGSEGV
+crash input once the fuzzer generates an input containing both `FUZZ` and
+`CRASH`.
+
+## Basic Usage
+
+```bash
+python3 toy_fuzzer.py
+```
+
+By default, the fuzzer uses:
+
+- Target: `./target/target1`
+- Seeds: `seeds/`
+- Dictionary: `dictionary/`
+- Output directory: `runs/`
+- Iterations: `10000`
+
+Use a fixed random seed for reproducible experiments:
+
+```bash
+python3 toy_fuzzer.py --iterations 10000 --random-seed 1337
+```
+
+Use an explicit target command:
+
+```bash
+python3 toy_fuzzer.py --target "./target/target1 @@"
+```
+
+If `@@` appears in the target command, it is replaced with the generated input
+file path. If `@@` is not present, the input path is appended as the final
+argument.
+
+## Dictionary Format
+
+Dictionary files are optional. Each non-empty line is loaded as a token.
 
 ```text
-./target_program generated_input.txt
+FUZZ
+CRASH
+FUZZ_CRASH
 ```
 
-This step is repeated many times, often thousands or millions of times.
-
-### 5. Monitor Program Behavior
-
-While the target program is running, the fuzzer observes its behavior.
-
-The fuzzer usually checks for:
-
-- Crash
-  - The program terminates abnormally.
-  - Examples: segmentation fault, abort, illegal instruction.
-
-- Hang or timeout
-  - The program does not finish within a reasonable time.
-  - This may indicate an infinite loop or severe performance bug.
-
-- Memory error
-  - The program accesses memory incorrectly.
-  - Examples: buffer overflow, use-after-free, double free.
-
-- Unexpected output
-  - The program produces an incorrect or inconsistent result.
-
-In coverage-guided fuzzing, the fuzzer also observes which parts of the program were executed.
-
-### 6. Keep Interesting Inputs
-
-Not all generated inputs are useful.
-
-A fuzzer keeps inputs that reveal new behavior.
-
-An input is usually considered interesting if it:
-
-- Executes a new branch
-- Reaches a new function
-- Increases code coverage
-- Triggers a crash
-- Causes a timeout
-- Produces unusual behavior
-
-These interesting inputs are saved and reused to generate more inputs.
-
-This feedback loop allows the fuzzer to gradually explore more of the program.
-
-### 7. Save Crashes
-
-When the target program crashes, the fuzzer saves the input that caused the crash.
-
-A saved crashing input is important because it allows developers to reproduce the bug.
-
-For example:
+A small subset of AFL-style dictionary syntax is also supported:
 
 ```text
-crashes/id_000001
-crashes/id_000002
-crashes/id_000003
+kw1="FUZZ"
+kw2="CRASH"
 ```
 
-Each crash input should be tested again to confirm that the crash is reproducible.
+The `toyFuzzer/dictionary/` directory is ignored by git because it is often
+target-specific experiment data. Recreate it locally with the commands in
+Quick Start, or point `--dict-dir` at another directory.
 
-### 8. Minimize the Crashing Input
-
-A crashing input is often large and difficult to analyze.
-
-Input minimization reduces the crashing input while preserving the same crash.
-
-For example:
+## Important CLI Options
 
 ```text
-Original crashing input:
-AAAAAAAAAAAAAAAAAAAAAAA%p%p%p%pBBBBBBBBBBBBBBBB
-
-Minimized crashing input:
-%p%p%p%p
+--target CMD              Target executable or command template
+--seed-dir DIR            Directory containing seed files
+--dict-dir DIR            Directory containing dictionary files
+--iterations N            Maximum number of generated inputs
+--duration SEC            Stop after a wall-clock time limit
+--timeout SEC             Per-execution timeout
+--random-seed N           Seed the PRNG for reproducible runs
+--max-input-len N         Limit generated input size
+--min-mutations N         Minimum stacked mutations per input
+--max-mutations N         Maximum stacked mutations per input
+--schedule rare|uniform   Parent corpus selection strategy
+--feedback MODE           status, output, or trace
+--minimize-crashes        Shrink unique crashing inputs before saving
+--save-duplicates         Save duplicate crash/hang signatures too
 ```
 
-A smaller input makes debugging easier.
+Show the full CLI:
 
-### 9. Analyze the Root Cause
+```bash
+python3 toy_fuzzer.py --help
+```
 
-After reproducing the crash, developers analyze why the program failed.
+## Output Files
 
-Common root causes include:
+Each run creates a timestamped directory under `runs/`:
 
-- Buffer overflow
-- Out-of-bounds read or write
-- Null pointer dereference
-- Use-after-free
-- Integer overflow
-- Assertion failure
-- Infinite loop
-- Unhandled exception
+```text
+runs/<timestamp>/
+  config.json             CLI configuration for the run
+  summary.json            Final aggregate statistics
+  stats.jsonl             Periodic progress snapshots
+  crashes/                Unique crashing inputs and metadata
+  hangs/                  Unique timeout inputs and metadata
+  corpus/
+    initial_corpus.txt    Human-readable initial corpus report
+    final_corpus.txt      Human-readable final corpus report
+    queue/                Saved corpus entries
+```
 
-Debuggers and sanitizers are often used in this step.
+Crash and hang inputs are saved as `.bin` files. A matching `.bin.json` metadata
+file stores size, SHA-256, exit status, elapsed time, selected features, and
+short stdout/stderr previews.
 
-Examples:
+## Reproducing a Crash
 
-- gdb
-- lldb
-- AddressSanitizer
-- UndefinedBehaviorSanitizer
-- Valgrind
+Compile the target, then pass the saved crashing input back to it:
 
-### 10. Fix the Bug and Add Regression Tests
+```bash
+./target/target1 runs/<timestamp>/crashes/crash_000001_<signature>.bin
+```
 
-After identifying the cause, the bug should be fixed.
+If the target was built with sanitizers, the sanitizer report should make the
+root cause easier to inspect:
 
-The crashing input should then be added as a regression test.
+```bash
+clang -g -O1 -fsanitize=address,undefined target/target1.c -o target/target1_asan
+./target/target1_asan runs/<timestamp>/crashes/crash_000001_<signature>.bin
+```
 
-This ensures that the same bug does not appear again in the future.
+## Feedback Modes
 
-A typical regression test checks that:
+ToyFuzzer does not yet collect real edge coverage. Instead, it provides three
+lightweight feedback modes:
 
-- The program no longer crashes
-- The input is handled safely
-- The expected behavior is preserved
+- `status`: keep behavior features based on exit status and timeout status
+- `output`: also hash stdout and stderr prefixes
+- `trace`: also parse output lines beginning with `TRACE:`, `FEATURE:`, or `COV:`
 
-## Summary
+The `trace` mode is useful for toy targets that print coarse-grained milestones:
 
-The basic fuzzing loop is:
+```c
+puts("TRACE:parsed_header");
+puts("TRACE:validated_magic");
+```
 
-1. Prepare seed inputs.
-2. Generate or mutate new inputs.
-3. Run the target program.
-4. Monitor crashes, hangs, and coverage.
-5. Save interesting inputs.
-6. Reproduce and minimize crashes.
-7. Analyze the root cause.
-8. Fix the bug and add regression tests.
+This gives a simple bridge toward coverage-guided fuzzing without adding a
+compiler instrumentation pipeline yet.
 
-Fuzzing is powerful because it automates repetitive testing and can discover edge cases that humans may not think of manually.
+## Research Directions
+
+Good first experiments:
+
+- Compare `--schedule uniform` and `--schedule rare`
+- Compare runs with and without dictionary tokens
+- Measure time-to-first-crash over many fixed random seeds
+- Compare feedback modes: `status`, `output`, and `trace`
+- Evaluate crash minimization overhead and resulting input size
+- Plot corpus size, feature count, and unique crash count from `stats.jsonl`
+
+Natural next implementation steps:
+
+- Add real coverage feedback with SanitizerCoverage, gcov, or LLVM profiling
+- Add a persistent mode to reduce process startup overhead
+- Add structured mutations for known formats
+- Add crash bucketing based on sanitizer stack traces
+- Add experiment scripts for repeated trials and statistical summaries
+
+## Safety Notes
+
+Fuzzing executes target programs many times with malformed inputs. Run targets in
+an isolated directory or sandbox when testing untrusted software. Avoid fuzzing
+programs that may modify important files, use the network, or execute external
+commands unless those effects are controlled.
